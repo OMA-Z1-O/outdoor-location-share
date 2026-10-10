@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>户外位置共享 · AR 指向</title>
+<title>户外位置共享 · AR 指向（P2P）</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root {
@@ -89,14 +89,16 @@
 
   .status-line { font-size:12px; color:var(--dim); margin:4px 0; word-break:break-all; }
   .toast { position:fixed; left:50%; top:60px; transform:translateX(-50%); background:rgba(11,16,32,.92); border:1px solid var(--accent); color:var(--text); padding:8px 16px; border-radius:8px; font-size:13px; z-index:200; display:none; max-width:90%; }
+  .peerbox { display:flex; gap:6px; margin-bottom:6px; }
+  .peerbox .copybtn { flex-shrink:0; padding:8px 10px; font-size:12px; }
 </style>
 </head>
 <body>
 <div class="app">
   <header>
-    <h1>🧭 户外位置共享 · AR</h1>
+    <h1>🧭 户外位置共享 · P2P</h1>
     <div id="connDot" class="off"></div>
-    <span id="connText">未连接</span>
+    <span id="connText">P2P 信令未连接</span>
   </header>
 
   <div class="tabs">
@@ -107,12 +109,17 @@
   <!-- ============ 发送端 ============ -->
   <div id="page-sender" class="page active">
     <div class="card">
-      <h2>服务器连接</h2>
+      <h2>P2P 连接（无需服务器）</h2>
+      <div class="peerbox">
+        <input type="text" id="myId" class="grow" readonly placeholder="生成中…">
+        <button id="btnCopyId" class="copybtn">复制我的ID</button>
+      </div>
       <div class="row">
-        <input type="text" id="wsUrl" class="grow" placeholder="ws://192.168.1.100:8080">
+        <input type="text" id="peerId" class="grow" placeholder="粘贴同伴的 ID">
         <button id="btnConn">连接</button>
       </div>
-      <div class="status-line" id="connStatusLine"></div>
+      <div class="status-line" id="connStatusLine">正在连接 PeerJS 信令服务器…</div>
+      <div class="hint">使用方法：每台设备打开本页面，互相把对方的 ID 粘贴到输入框点“连接”即可互通（多台设备都连即可互相广播）。首次需允许定位/摄像头权限。</div>
     </div>
 
     <div class="card">
@@ -167,18 +174,23 @@
       <h2>④ 推送给同伴</h2>
       <button id="btnPush" class="warn" style="width:100%" disabled>🚀 推送目标位置给同伴</button>
       <div class="status-line" id="pushLine"></div>
+      <div class="status-line" id="peerListLine">已连接同伴：0</div>
     </div>
   </div>
 
   <!-- ============ 接收端 ============ -->
   <div id="page-viewer" class="page">
     <div class="card">
-      <h2>服务器连接</h2>
+      <h2>P2P 连接（无需服务器）</h2>
+      <div class="peerbox">
+        <input type="text" id="myId2" class="grow" readonly placeholder="生成中…">
+        <button id="btnCopyId2" class="copybtn">复制我的ID</button>
+      </div>
       <div class="row">
-        <input type="text" id="wsUrl2" class="grow" placeholder="ws://192.168.1.100:8080">
+        <input type="text" id="peerId2" class="grow" placeholder="粘贴同伴的 ID">
         <button id="btnConn2">连接</button>
       </div>
-      <div class="status-line" id="connStatusLine2"></div>
+      <div class="status-line" id="connStatusLine2">正在连接 PeerJS 信令服务器…</div>
     </div>
     <div class="card">
       <h2>启动 AR 指示</h2>
@@ -190,6 +202,7 @@
       <div class="status-line" id="posLine2">位置：未获取</div>
       <div class="status-line" id="headingLine2">朝向：未启动</div>
       <div class="status-line" id="targetLine2">目标：未收到</div>
+      <div class="status-line" id="peerListLine2">已连接同伴：0</div>
     </div>
   </div>
 </div>
@@ -216,6 +229,7 @@
 </div>
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (function(){
 "use strict";
@@ -265,7 +279,8 @@ function lineIntersect(p1, a1, p2, a2) {
 
 // ===================== 状态 =====================
 const state = {
-  role: 'sender', ws: null,
+  role: 'sender',
+  peer: null, myId: null, conns: {}, // conns: peerId -> DataConnection
   pos: null, heading: null, compassOn: false,
   obs: { A: null, B: null },
   target: null, // {lat, lng, distance, source}
@@ -329,35 +344,123 @@ async function openCamera(videoEl, onStream) {
   }
 }
 
-// ===================== WebSocket =====================
-function connect(wsInput, statusEl) {
-  const url = wsInput.value.trim() || ('ws://' + location.host);
-  if (state.ws) { try { state.ws.close(); } catch(e){} state.ws = null; }
-  let ws;
-  try { ws = new WebSocket(url); } catch(e) { statusEl.textContent = '地址无效：' + url; toast('WebSocket 地址无效'); return; }
-  state.ws = ws;
-  statusEl.textContent = '连接中：' + url;
-  ws.onopen = () => {
+// ===================== PeerJS P2P =====================
+const PEER_ERR_MSG = {
+  'peer-unavailable': '无法找到该 ID，请确认对方已打开页面并复制正确 ID',
+  'server-error': '信令服务器连接失败（可能网络不通，请检查网络后重试）',
+  'network': '网络中断',
+  'socket-error': '信令服务器连接失败（可能网络不通，请检查网络后重试）',
+  'unavailable-id': 'ID 已被占用，已自动换新',
+  'browser-incompatible': '浏览器不支持 WebRTC，请使用较新的 Chrome/Safari/Edge'
+};
+function humanPeerErr(e) {
+  return PEER_ERR_MSG[e.type] || ('连接异常：' + (e.type || e));
+}
+
+function updateConnUI() {
+  const n = Object.keys(state.conns).length;
+  $('connDot').className = state.myId ? 'on' : 'off';
+  $('connText').textContent = state.myId ? ('已连同伴 ' + n + ' 台') : '信令未连接';
+  $('peerListLine').textContent = '已连接同伴：' + n + (n ? '（' + Object.keys(state.conns).join(', ') + '）' : '');
+  $('peerListLine2').textContent = '已连接同伴：' + n + (n ? '（' + Object.keys(state.conns).join(', ') + '）' : '');
+}
+
+function initPeer() {
+  // 生成带可读前缀的随机 ID，方便互相口头/微信传递
+  const rand = Math.random().toString(36).slice(2, 6);
+  const myId = 'outdoor-' + rand;
+  const peer = new Peer(myId, {
+    debug: 1,
+    config: { iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' }
+    ]}
+  });
+  state.peer = peer;
+
+  peer.on('open', id => {
+    state.myId = id;
+    $('myId').value = id; $('myId2').value = id;
     $('connDot').className = 'on';
-    $('connText').textContent = '已连接';
-    statusEl.textContent = '已连接';
-    ws.send(JSON.stringify({ type: 'register', role: state.role }));
-  };
-  ws.onclose = () => {
+    $('connText').textContent = '已连同伴 ' + Object.keys(state.conns).length + ' 台';
+    $('connStatusLine').textContent = '信令已连接，我的 ID：' + id + '（已自动复制到上方输入框）';
+    $('connStatusLine2').textContent = '信令已连接，我的 ID：' + id;
+    // 尝试自动复制 ID
+    try { navigator.clipboard && navigator.clipboard.writeText(id); } catch(e){}
+    updateConnUI();
+  });
+
+  peer.on('connection', conn => {
+    conn.on('open', () => {
+      state.conns[conn.peer] = conn;
+      updateConnUI();
+      $('connStatusLine').textContent = '已连接同伴：' + conn.peer + '（发送端可直接拍照推送）';
+      $('connStatusLine2').textContent = '已连接同伴：' + conn.peer;
+      toast('已与 ' + conn.peer + ' 建立连接');
+    });
+    conn.on('data', data => {
+      try {
+        if (data && data.type === 'target-update') onTargetUpdate(data.target);
+      } catch(e){}
+    });
+    conn.on('close', () => { delete state.conns[conn.peer]; updateConnUI(); });
+    conn.on('error', () => { delete state.conns[conn.peer]; updateConnUI(); });
+  });
+
+  peer.on('error', err => {
+    if (err.type === 'unavailable-id') {
+      // ID 冲突，换新 ID 重试一次
+      toast('ID 冲突，正在重新生成…');
+      setTimeout(() => { try { peer.destroy(); } catch(e){} initPeer(); }, 500);
+      return;
+    }
     $('connDot').className = 'off';
-    $('connText').textContent = '已断开';
-    if (statusEl) statusEl.textContent = '连接已断开';
-    if (state.role === 'viewer') $('targetLine2').textContent = '目标：连接断开';
-  };
-  ws.onerror = () => { statusEl.textContent = '连接失败，请检查服务器与地址'; toast('连接失败'); };
-  ws.onmessage = ev => {
-    let msg; try { msg = JSON.parse(ev.data); } catch(e){ return; }
-    if (msg.type === 'target-update') onTargetUpdate(msg.target);
-    if (msg.type === 'pong') { /* 心跳 */ }
-  };
+    $('connText').textContent = '信令连接失败';
+    $('connStatusLine').textContent = '信令连接失败：' + humanPeerErr(err);
+    $('connStatusLine2').textContent = '信令连接失败：' + humanPeerErr(err);
+    toast('连接失败：' + humanPeerErr(err));
+  });
+
+  peer.on('disconnected', () => {
+    $('connDot').className = 'off';
+    $('connText').textContent = '信令已断开';
+    $('connStatusLine').textContent = '信令已断开，尝试重连…';
+    $('connStatusLine2').textContent = '信令已断开，尝试重连…';
+    try { peer.reconnect(); } catch(e){}
+  });
+}
+
+function connectTo(targetId, statusEl) {
+  const id = targetId.trim();
+  if (!id) { toast('请输入同伴 ID'); return; }
+  if (!state.peer || !state.myId) { toast('信令尚未就绪，请稍候'); return; }
+  if (state.conns[id]) { toast('已连接该同伴'); return; }
+  statusEl.textContent = '正在连接 ' + id + ' …';
+  const conn = state.peer.connect(id, { reliable: true });
+  conn.on('open', () => {
+    state.conns[id] = conn;
+    statusEl.textContent = '已连接：' + id;
+    updateConnUI();
+    toast('已连接同伴 ' + id);
+  });
+  conn.on('error', err => {
+    statusEl.textContent = '连接 ' + id + ' 失败：' + (err.type === 'peer-unavailable' ? '对方 ID 不存在或未在线' : humanPeerErr(err));
+    toast('连接失败');
+  });
+  conn.on('close', () => { if (state.conns[id]) { delete state.conns[id]; updateConnUI(); } });
+}
+
+function broadcast(msg) {
+  Object.keys(state.conns).forEach(k => {
+    try { state.conns[k].send(msg); } catch(e){}
+  });
 }
 
 // ===================== 发送端 =====================
+function checkObsReady() {
+  $('btnRecordObs').disabled = !(state.pos && state.heading !== null);
+}
+
 function recordObs(slot) {
   if (!state.pos) { toast('请先获取位置'); return; }
   if (state.heading === null) { toast('请先启动指南针'); return; }
@@ -486,19 +589,32 @@ document.querySelectorAll('.tab').forEach(tab => {
     state.role = tab.dataset.page === 'viewer' ? 'viewer' : 'sender';
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     $('page-' + state.role).classList.add('active');
-    // 重连以更新角色
-    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-      state.ws.send(JSON.stringify({ type: 'register', role: state.role }));
-    }
   });
 });
 
-$('btnConn').addEventListener('click', () => connect($('wsUrl'), $('connStatusLine')));
-$('btnConn2').addEventListener('click', () => connect($('wsUrl2'), $('connStatusLine2')));
+function copyMyId() {
+  const id = state.myId || $('myId').value;
+  if (!id) { toast('ID 尚未生成'); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(id).then(() => toast('ID 已复制：' + id)).catch(() => fallbackCopy(id));
+  } else fallbackCopy(id);
+}
+function fallbackCopy(id) {
+  const ta = document.createElement('textarea');
+  ta.value = id; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); toast('ID 已复制：' + id); } catch(e){ toast(id); }
+  document.body.removeChild(ta);
+}
+
+$('btnCopyId').addEventListener('click', copyMyId);
+$('btnCopyId2').addEventListener('click', copyMyId);
+$('btnConn').addEventListener('click', () => connectTo($('peerId').value, $('connStatusLine')));
+$('btnConn2').addEventListener('click', () => connectTo($('peerId2').value, $('connStatusLine2')));
 
 $('btnLoc').addEventListener('click', () => getPosition(p => {
   state.pos = p;
   $('posLine').textContent = '位置：' + p.lat.toFixed(6) + ', ' + p.lng.toFixed(6) + '（精度 ' + Math.round(p.acc) + 'm）';
+  checkObsReady();
 }));
 
 $('btnCompass').addEventListener('click', () => {
@@ -510,6 +626,7 @@ $('btnCompass').addEventListener('click', () => {
     $('headingLine').textContent = '朝向：' + h.toFixed(1) + '°（对准目标时记录）';
     // 接收端同步显示
     $('headingLine2').textContent = '朝向：' + h.toFixed(1) + '°';
+    checkObsReady();
   });
   toast('指南针已启动，请保持手机水平');
 });
@@ -554,22 +671,17 @@ $('btnCalcTri').addEventListener('click', calcTriangulation);
 
 $('btnPush').addEventListener('click', () => {
   if (!state.target) { toast('请先计算目标位置'); return; }
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) { toast('请先连接服务器'); return; }
-  state.ws.send(JSON.stringify({ type: 'target-update', target: state.target }));
-  $('pushLine').textContent = '已推送：' + state.target.lat.toFixed(6) + ', ' + state.target.lng.toFixed(6);
+  if (!Object.keys(state.conns).length) { toast('尚未连接任何同伴'); return; }
+  broadcast({ type: 'target-update', target: state.target });
+  $('pushLine').textContent = '已推送：' + state.target.lat.toFixed(6) + ', ' + state.target.lng.toFixed(6) + '（共 ' + Object.keys(state.conns).length + ' 台）';
   toast('目标位置已推送');
 });
 
 $('btnStartAr').addEventListener('click', startAR);
 $('arClose').addEventListener('click', stopAR);
 
-// 默认填充 ws 地址
-const defWs = 'ws://' + location.host;
-$('wsUrl').value = defWs;
-$('wsUrl2').value = defWs;
-
-// 心跳保活
-setInterval(() => { if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({type:'ping'})); }, 25000);
+// 初始化 Peer
+initPeer();
 
 })();
 </script>
