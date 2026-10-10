@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>户外位置共享 · AR 指向</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root {
+    --bg:#0b1020; --panel:#141b2e; --line:#26324d; --text:#e8ecf7; --dim:#8b96b8;
+    --accent:#4dd0ff; --hl:#7cff00; --warn:#ffb800; --danger:#ff5470; --ok:#35e07f;
+  }
+  html,body { height:100%; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  .app { max-width:520px; margin:0 auto; min-height:100%; display:flex; flex-direction:column; }
+
+  /* 顶栏 */
+  header { padding:12px 16px; display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:16px; flex:1; }
+  #connDot { width:10px; height:10px; border-radius:50%; background:#555; flex-shrink:0; }
+  #connDot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  #connDot.off { background:var(--danger); }
+  #connText { font-size:12px; color:var(--dim); }
+
+  /* 角色 Tab */
+  .tabs { display:flex; gap:8px; padding:10px 16px; border-bottom:1px solid var(--line); }
+  .tab { flex:1; padding:10px 0; text-align:center; border-radius:8px; border:1px solid var(--line); color:var(--dim); font-size:14px; cursor:pointer; background:var(--panel); }
+  .tab.active { border-color:var(--accent); color:var(--accent); background:rgba(77,208,255,.08); }
+
+  .page { flex:1; overflow-y:auto; padding:14px 16px 30px; display:none; }
+  .page.active { display:block; }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:12px; }
+  .card h2 { font-size:14px; margin-bottom:8px; color:var(--accent); font-weight:600; }
+
+  .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .grow { flex:1; min-width:0; }
+  input[type=text], input[type=number] { background:#0d1322; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:8px 10px; font-size:14px; width:100%; }
+  input:focus { outline:none; border-color:var(--accent); }
+
+  button { border:none; border-radius:8px; padding:10px 14px; font-size:14px; cursor:pointer; color:#06101f; background:var(--accent); font-weight:600; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  button.warn { background:var(--warn); color:#231a00; }
+  button.small { padding:6px 10px; font-size:12px; }
+
+  .val { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .val small { font-size:12px; color:var(--dim); font-weight:400; margin-left:4px; }
+  .hint { font-size:12px; color:var(--dim); line-height:1.5; }
+  .ok { color:var(--ok); } .warn-c { color:var(--warn); } .danger-c { color:var(--danger); }
+
+  .obs { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:8px 0; }
+  .obs .slot { border:1px dashed var(--line); border-radius:8px; padding:10px; font-size:12px; min-height:64px; }
+  .obs .slot.filled { border-style:solid; border-color:var(--ok); }
+  .obs .slot b { display:block; margin-bottom:4px; color:var(--dim); }
+
+  .result { background:rgba(124,255,0,.06); border:1px solid var(--hl); border-radius:10px; padding:10px; font-size:13px; line-height:1.7; display:none; }
+  .result.show { display:block; }
+  .result .big { font-size:20px; color:var(--hl); font-weight:700; }
+
+  /* AR 视图 */
+  #arView { position:fixed; inset:0; background:#000; z-index:50; display:none; }
+  #arView.on { display:block; }
+  #arVideo { width:100%; height:100%; object-fit:cover; }
+  #arOverlay { position:absolute; inset:0; pointer-events:none; }
+  /* 高亮目标标记 */
+  #targetMark { position:absolute; left:50%; top:42%; transform:translate(-50%,-50%); display:none; }
+  #targetMark .ring { width:56px; height:56px; border-radius:50%; border:4px solid var(--hl); box-shadow:0 0 18px rgba(124,255,0,.9), inset 0 0 18px rgba(124,255,0,.5); position:relative; animation:pulse 1.6s infinite; }
+  #targetMark .ring::after { content:""; position:absolute; left:50%; top:50%; width:10px; height:10px; transform:translate(-50%,-50%); border-radius:50%; background:var(--hl); box-shadow:0 0 10px var(--hl); }
+  #targetMark .label { position:absolute; left:50%; top:64px; transform:translateX(-50%); background:rgba(11,16,32,.85); color:var(--hl); font-size:12px; padding:2px 8px; border-radius:6px; white-space:nowrap; border:1px solid var(--hl); }
+  @keyframes pulse { 0%,100% { transform:scale(1); opacity:1; } 50% { transform:scale(1.15); opacity:.75; } }
+  /* 边缘指示箭头 */
+  #edgeArrow { position:absolute; top:38%; display:none; font-size:44px; color:var(--hl); text-shadow:0 0 12px var(--hl); animation:blink 0.8s infinite; }
+  @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+  /* 水平刻度 */
+  #hud { position:absolute; left:0; right:0; bottom:14px; pointer-events:none; }
+  #hud .bar { width:70%; margin:0 auto; height:26px; position:relative; border-left:1px solid rgba(255,255,255,.5); border-right:1px solid rgba(255,255,255,.5); }
+  #hud .center { position:absolute; left:50%; top:0; width:1px; height:26px; background:rgba(255,255,255,.35); }
+  #hud .needle { position:absolute; left:50%; top:-3px; width:3px; height:32px; background:var(--hl); box-shadow:0 0 8px var(--hl); transform-origin:bottom center; }
+  #hud .deg { text-align:center; font-size:12px; color:#fff; text-shadow:0 1px 3px #000; margin-top:6px; }
+  #arInfo { position:absolute; top:14px; left:14px; right:14px; background:rgba(11,16,32,.7); border-radius:10px; padding:8px 10px; font-size:12px; line-height:1.6; color:#fff; }
+  #arClose { position:absolute; top:14px; right:14px; z-index:60; padding:6px 12px; font-size:12px; background:rgba(255,84,112,.9); color:#fff; }
+
+  #camPreviewWrap { position:relative; width:100%; aspect-ratio:4/3; background:#000; border-radius:10px; overflow:hidden; margin-bottom:8px; }
+  #camPreview { width:100%; height:100%; object-fit:cover; }
+  #snapBtn { position:absolute; bottom:10px; left:50%; transform:translateX(-50%); border-radius:50%; width:60px; height:60px; border:4px solid #fff; background:rgba(255,255,255,.25); color:#fff; font-size:12px; z-index:2; }
+  #snapOverlay { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); z-index:3; }
+  #snapOverlay img { width:100%; height:100%; object-fit:contain; }
+
+  .status-line { font-size:12px; color:var(--dim); margin:4px 0; word-break:break-all; }
+  .toast { position:fixed; left:50%; top:60px; transform:translateX(-50%); background:rgba(11,16,32,.92); border:1px solid var(--accent); color:var(--text); padding:8px 16px; border-radius:8px; font-size:13px; z-index:200; display:none; max-width:90%; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>🧭 户外位置共享 · AR</h1>
+    <div id="connDot" class="off"></div>
+    <span id="connText">未连接</span>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-page="sender">📷 发送端（定点拍照）</div>
+    <div class="tab" data-page="viewer">👁 接收端（AR 标注）</div>
+  </div>
+
+  <!-- ============ 发送端 ============ -->
+  <div id="page-sender" class="page active">
+    <div class="card">
+      <h2>服务器连接</h2>
+      <div class="row">
+        <input type="text" id="wsUrl" class="grow" placeholder="ws://192.168.1.100:8080">
+        <button id="btnConn">连接</button>
+      </div>
+      <div class="status-line" id="connStatusLine"></div>
+    </div>
+
+    <div class="card">
+      <h2>① 定位与指南针</h2>
+      <div class="row" style="margin-bottom:6px">
+        <button id="btnLoc" class="ghost grow">📍 获取我的位置</button>
+        <button id="btnCompass" class="ghost grow">🧭 启动指南针</button>
+      </div>
+      <div class="status-line" id="posLine">位置：未获取</div>
+      <div class="status-line" id="headingLine">朝向：未启动</div>
+      <div class="hint">提示：iOS 需点击按钮授权；Android 建议手机水平放置并画“8”字校准；指南针数值为手机顶部朝向（0=北）。</div>
+    </div>
+
+    <div class="card">
+      <h2>② 拍照对准目标并记录观测</h2>
+      <div id="camPreviewWrap">
+        <video id="camPreview" autoplay playsinline muted></video>
+        <div id="snapOverlay"><img id="snapImg" alt=""></div>
+        <button id="snapBtn">📸 拍照</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="btnStartCam" class="ghost grow">启动摄像头预览</button>
+        <button id="btnRecordObs" class="grow" disabled>记录当前观测点</button>
+      </div>
+      <div class="obs">
+        <div class="slot" id="slotA"><b>观测点 A</b>待记录</div>
+        <div class="slot" id="slotB"><b>观测点 B</b>待记录</div>
+      </div>
+      <div class="row">
+        <button id="btnResetObs" class="ghost small">清空观测</button>
+        <span class="hint grow">方法1：在两个不同位置分别对准目标记录，自动三角交汇计算。</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>③ 计算目标位置</h2>
+      <div class="row" style="margin-bottom:8px">
+        <button id="btnModeDist" class="ghost small">切换到“单点+距离”模式</button>
+      </div>
+      <div id="distMode" style="display:none; margin-bottom:8px">
+        <div class="row">
+          <input type="number" id="distInput" class="grow" placeholder="目标距离（米）" min="1">
+          <button id="btnCalcDist" class="small">计算</button>
+        </div>
+        <div class="hint">方法2：当前位置对准目标，输入到目标的直线距离，直接推算目标坐标。</div>
+      </div>
+      <button id="btnCalcTri" class="grow" style="width:100%" disabled>计算目标位置（三角交汇）</button>
+      <div class="result" id="calcResult"></div>
+    </div>
+
+    <div class="card">
+      <h2>④ 推送给同伴</h2>
+      <button id="btnPush" class="warn" style="width:100%" disabled>🚀 推送目标位置给同伴</button>
+      <div class="status-line" id="pushLine"></div>
+    </div>
+  </div>
+
+  <!-- ============ 接收端 ============ -->
+  <div id="page-viewer" class="page">
+    <div class="card">
+      <h2>服务器连接</h2>
+      <div class="row">
+        <input type="text" id="wsUrl2" class="grow" placeholder="ws://192.168.1.100:8080">
+        <button id="btnConn2">连接</button>
+      </div>
+      <div class="status-line" id="connStatusLine2"></div>
+    </div>
+    <div class="card">
+      <h2>启动 AR 指示</h2>
+      <button id="btnStartAr" style="width:100%">🎥 打开摄像头 AR 视图</button>
+      <div class="hint" style="margin-top:6px">打开后：屏幕显示摄像头画面，黄色高亮标记指向目标方向；未收到目标数据时会提示。</div>
+    </div>
+    <div class="card">
+      <h2>传感器状态</h2>
+      <div class="status-line" id="posLine2">位置：未获取</div>
+      <div class="status-line" id="headingLine2">朝向：未启动</div>
+      <div class="status-line" id="targetLine2">目标：未收到</div>
+    </div>
+  </div>
+</div>
+
+<!-- AR 全屏视图 -->
+<div id="arView">
+  <video id="arVideo" autoplay playsinline muted></video>
+  <div id="arOverlay">
+    <div id="edgeArrow"></div>
+    <div id="targetMark">
+      <div class="ring"></div>
+      <div class="label" id="targetMarkLabel">目标</div>
+    </div>
+    <div id="hud">
+      <div class="bar">
+        <div class="center"></div>
+        <div class="needle" id="hudNeedle"></div>
+      </div>
+      <div class="deg" id="hudDeg"></div>
+    </div>
+  </div>
+  <div id="arInfo"></div>
+  <button id="arClose">关闭</button>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+"use strict";
+// ===================== 工具函数 =====================
+const R = 6371000; // 地球平均半径(米)
+const toRad = d => d * Math.PI / 180;
+const toDeg = r => r * 180 / Math.PI;
+const normDeg = d => ((d % 360) + 360) % 360;
+const relAngle = (a, b) => { // a-b 归一化到 [-180,180]
+  let r = (a - b) % 360; if (r > 180) r -= 360; if (r < -180) r += 360; return r;
+};
+
+// 从A点指向B点的方位角（0=北，顺时针）
+function bearing(fromLat, fromLng, toLat, toLng) {
+  const f1 = toRad(fromLat), f2 = toRad(toLat), dl = toRad(toLng - fromLng);
+  const y = Math.sin(dl) * Math.cos(f2);
+  const x = Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl);
+  return normDeg(toDeg(Math.atan2(y, x)));
+}
+
+// 从点沿方位角走距离d到达的目标点
+function destination(lat, lng, brg, d) {
+  const f1 = toRad(lat), l1 = toRad(lng), th = toRad(brg), dd = d / R;
+  const f2 = Math.asin(Math.sin(f1) * Math.cos(dd) + Math.cos(f1) * Math.sin(dd) * Math.cos(th));
+  const l2 = l1 + Math.atan2(Math.sin(th) * Math.sin(dd) * Math.cos(f1), Math.cos(dd) - Math.sin(f1) * Math.sin(f2));
+  return { lat: toDeg(f2), lng: normDeg(toDeg(l2)) };
+}
+
+// 球面 → 局部平面投影（以 ref 为原点，x 东 / y 北）
+function project(lat, lng, refLat, refLng) {
+  return { x: R * toRad(lng - refLng) * Math.cos(toRad(refLat)), y: R * toRad(lat - refLat) };
+}
+function unproject(x, y, refLat, refLng) {
+  return { lat: refLat + toDeg(y / R), lng: refLng + toDeg(x / (R * Math.cos(toRad(refLat)))) };
+}
+
+// 两条方位线求交点（平面近似）：p1,p2 为观测点平面坐标，a1,a2 为方位角(度)
+function lineIntersect(p1, a1, p2, a2) {
+  const t1 = toRad(a1), t2 = toRad(a2);
+  const d1 = { x: Math.sin(t1), y: Math.cos(t1) };
+  const d2 = { x: Math.sin(t2), y: Math.cos(t2) };
+  const det = d1.x * d2.y - d1.y * d2.x;
+  if (Math.abs(det) < 1e-9) return null; // 平行/重合
+  const s = ((p2.x - p1.x) * d2.y - (p2.y - p1.y) * d2.x) / det;
+  return { x: p1.x + s * d1.x, y: p1.y + s * d1.y };
+}
+
+// ===================== 状态 =====================
+const state = {
+  role: 'sender', ws: null,
+  pos: null, heading: null, compassOn: false,
+  obs: { A: null, B: null },
+  target: null, // {lat, lng, distance, source}
+  distMode: false,
+  ar: { stream: null, running: false }
+};
+
+const $ = id => document.getElementById(id);
+
+// ===================== Toast =====================
+let toastTimer = null;
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.display = 'none', 2600);
+}
+
+// ===================== 通用：定位 =====================
+function getPosition(cb) {
+  if (!navigator.geolocation) { toast('浏览器不支持定位'); cb(null); return; }
+  navigator.geolocation.getCurrentPosition(p => cb({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }),
+    err => { toast('定位失败：' + err.message); cb(null); },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+}
+
+// ===================== 通用：指南针 =====================
+function startCompass(onUpdate) {
+  const handler = e => {
+    let h = null;
+    if (typeof e.webkitCompassHeading === 'number') {
+      h = e.webkitCompassHeading;           // iOS：已校正的磁航向
+    } else if (e.alpha !== null && e.alpha !== undefined) {
+      // Android：alpha 为绕 Z 轴旋转角，非磁北；仅作近似并提示
+      h = normDeg(360 - e.alpha);
+    }
+    if (h !== null) onUpdate(h);
+  };
+  if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(res => {
+      if (res === 'granted') window.addEventListener('deviceorientation', handler, true);
+      else toast('指南针授权被拒绝');
+    }).catch(() => toast('指南针授权失败'));
+  } else {
+    window.addEventListener('deviceorientation', handler, true);
+  }
+}
+
+// ===================== 通用：摄像头 =====================
+async function openCamera(videoEl, onStream) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('浏览器不支持摄像头'); return null; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false
+    });
+    videoEl.srcObject = stream;
+    await videoEl.play().catch(()=>{});
+    onStream && onStream(stream);
+    return stream;
+  } catch (e) {
+    toast('摄像头打开失败：' + (e && e.message || e));
+    return null;
+  }
+}
+
+// ===================== WebSocket =====================
+function connect(wsInput, statusEl) {
+  const url = wsInput.value.trim() || ('ws://' + location.host);
+  if (state.ws) { try { state.ws.close(); } catch(e){} state.ws = null; }
+  let ws;
+  try { ws = new WebSocket(url); } catch(e) { statusEl.textContent = '地址无效：' + url; toast('WebSocket 地址无效'); return; }
+  state.ws = ws;
+  statusEl.textContent = '连接中：' + url;
+  ws.onopen = () => {
+    $('connDot').className = 'on';
+    $('connText').textContent = '已连接';
+    statusEl.textContent = '已连接';
+    ws.send(JSON.stringify({ type: 'register', role: state.role }));
+  };
+  ws.onclose = () => {
+    $('connDot').className = 'off';
+    $('connText').textContent = '已断开';
+    if (statusEl) statusEl.textContent = '连接已断开';
+    if (state.role === 'viewer') $('targetLine2').textContent = '目标：连接断开';
+  };
+  ws.onerror = () => { statusEl.textContent = '连接失败，请检查服务器与地址'; toast('连接失败'); };
+  ws.onmessage = ev => {
+    let msg; try { msg = JSON.parse(ev.data); } catch(e){ return; }
+    if (msg.type === 'target-update') onTargetUpdate(msg.target);
+    if (msg.type === 'pong') { /* 心跳 */ }
+  };
+}
+
+// ===================== 发送端 =====================
+function recordObs(slot) {
+  if (!state.pos) { toast('请先获取位置'); return; }
+  if (state.heading === null) { toast('请先启动指南针'); return; }
+  const obs = { lat: state.pos.lat, lng: state.pos.lng, heading: state.heading, time: Date.now() };
+  state.obs[slot] = obs;
+  const slotEl = $('slot' + slot);
+  slotEl.classList.add('filled');
+  slotEl.innerHTML = '<b>观测点 ' + slot + '</b>位置 ' + obs.lat.toFixed(6) + ', ' + obs.lng.toFixed(6) +
+    '<br>朝向 ' + obs.heading.toFixed(1) + '°（对准目标）';
+  checkTriReady();
+}
+
+function checkTriReady() {
+  $('btnCalcTri').disabled = !(state.obs.A && state.obs.B);
+}
+
+function calcTriangulation() {
+  const A = state.obs.A, B = state.obs.B;
+  if (!A || !B) { toast('需要两个观测点'); return; }
+  const ref = { lat: A.lat, lng: A.lng };
+  const pA = project(A.lat, A.lng, ref.lat, ref.lng);
+  const pB = project(B.lat, B.lng, ref.lat, ref.lng);
+  const pt = lineIntersect(pA, A.heading, pB, B.heading);
+  if (!pt) { toast('两条方位线平行，无法交汇（请换观测位置）'); return; }
+  const target = unproject(pt.x, pt.y, ref.lat, ref.lng);
+  const dist = Math.hypot(pt.x - pA.x, pt.y - pA.y);
+  state.target = { lat: target.lat, lng: target.lng, distance: dist, source: '三角交汇' };
+  showResult();
+}
+
+function calcByDistance() {
+  if (!state.pos) { toast('请先获取位置'); return; }
+  if (state.heading === null) { toast('请先启动指南针'); return; }
+  const d = parseFloat($('distInput').value);
+  if (!(d > 0)) { toast('请输入有效距离（米）'); return; }
+  const t = destination(state.pos.lat, state.pos.lng, state.heading, d);
+  state.target = { lat: t.lat, lng: t.lng, distance: d, source: '单点+距离' };
+  showResult();
+}
+
+function showResult() {
+  const t = state.target;
+  const r = $('calcResult');
+  r.classList.add('show');
+  r.innerHTML = '目标位置：<span class="big">' + t.lat.toFixed(6) + ', ' + t.lng.toFixed(6) + '</span>' +
+    '<br>计算方式：' + t.source + '　距离约 <b>' + Math.round(t.distance) + ' 米</b>';
+  $('btnPush').disabled = false;
+  $('pushLine').textContent = '已计算，待推送';
+}
+
+// ===================== 接收端 / AR =====================
+function onTargetUpdate(target) {
+  state.target = target;
+  $('targetLine2').textContent = '目标：' + target.lat.toFixed(6) + ', ' + target.lng.toFixed(6) + '（约 ' + Math.round(target.distance) + ' 米）';
+  if (state.ar.running) {
+    $('arInfo').innerHTML = '已收到目标：<b>' + target.lat.toFixed(6) + ', ' + target.lng.toFixed(6) + '</b>　距离约 ' + Math.round(target.distance) + ' 米<br>请转动手机，高亮标记会指向目标方向。';
+    $('targetMark').style.display = 'block';
+  } else {
+    toast('已收到目标位置');
+  }
+}
+
+const FOV_H = 60; // 假设水平视场角（度），环境摄像头通常 60-70°
+function updateAR() {
+  const t = state.target, p = state.pos;
+  if (!t || !p || state.heading === null || !state.ar.running) return;
+  const brg = bearing(p.lat, p.lng, t.lat, t.lng);
+  const rel = relAngle(brg, state.heading);
+  const W = window.innerWidth;
+  const ratio = Math.tan(toRad(rel)) / Math.tan(toRad(FOV_H / 2));
+  let x = W / 2 + ratio * (W / 2);
+  const mark = $('targetMark'), arrow = $('edgeArrow');
+  if (Math.abs(rel) <= FOV_H / 2) {
+    mark.style.display = 'block';
+    mark.style.left = x + 'px';
+    mark.style.top = '42%';
+    arrow.style.display = 'none';
+    $('targetMarkLabel').textContent = '目标 ' + Math.round(t.distance) + 'm';
+  } else {
+    mark.style.display = 'none';
+    arrow.style.display = 'block';
+    arrow.style.left = (rel > 0 ? 'auto' : '10px');
+    arrow.style.right = (rel > 0 ? '10px' : 'auto');
+    arrow.textContent = rel > 0 ? '▶' : '◀';
+  }
+  // 刻度针
+  const need = $('hudNeedle');
+  const d = Math.max(-1, Math.min(1, ratio));
+  need.style.left = (50 + d * 35) + '%';
+  $('hudDeg').textContent = '目标方位 ' + brg.toFixed(0) + '°　相对 ' + (rel > 0 ? '+' : '') + rel.toFixed(0) + '°';
+  $('arInfo').innerHTML = '目标 ' + Math.round(t.distance) + 'm　方位 ' + brg.toFixed(0) + '°　相对 ' + (rel > 0 ? '+' : '') + rel.toFixed(0) + '°';
+}
+
+async function startAR() {
+  const stream = await openCamera($('arVideo'), null);
+  if (!stream) return;
+  state.ar.stream = stream;
+  state.ar.running = true;
+  $('arView').classList.add('on');
+  $('targetMark').style.display = state.target ? 'block' : 'none';
+  $('arInfo').textContent = state.target ? '已收到目标位置，转动手机对准方向。' : '等待接收目标位置…';
+  // 启用指南针（接收端）
+  if (!state.compassOn) {
+    state.compassOn = true;
+    startCompass(h => { state.heading = h; $('headingLine2').textContent = '朝向：' + h.toFixed(1) + '°'; });
+  }
+  // 获取自身位置
+  getPosition(p => { state.pos = p; $('posLine2').textContent = '位置：' + p.lat.toFixed(6) + ', ' + p.lng.toFixed(6); });
+  // 启动 AR 更新循环
+  if (window.__arTimer) clearInterval(window.__arTimer);
+  window.__arTimer = setInterval(updateAR, 80);
+}
+
+function stopAR() {
+  state.ar.running = false;
+  if (state.ar.stream) { state.ar.stream.getTracks().forEach(t => t.stop()); state.ar.stream = null; }
+  $('arView').classList.remove('on');
+  if (window.__arTimer) { clearInterval(window.__arTimer); window.__arTimer = null; }
+}
+
+// ===================== UI 绑定 =====================
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    state.role = tab.dataset.page === 'viewer' ? 'viewer' : 'sender';
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    $('page-' + state.role).classList.add('active');
+    // 重连以更新角色
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify({ type: 'register', role: state.role }));
+    }
+  });
+});
+
+$('btnConn').addEventListener('click', () => connect($('wsUrl'), $('connStatusLine')));
+$('btnConn2').addEventListener('click', () => connect($('wsUrl2'), $('connStatusLine2')));
+
+$('btnLoc').addEventListener('click', () => getPosition(p => {
+  state.pos = p;
+  $('posLine').textContent = '位置：' + p.lat.toFixed(6) + ', ' + p.lng.toFixed(6) + '（精度 ' + Math.round(p.acc) + 'm）';
+}));
+
+$('btnCompass').addEventListener('click', () => {
+  if (state.compassOn) { toast('指南针已启动'); return; }
+  state.compassOn = true;
+  $('headingLine').textContent = '朝向：启动中…';
+  startCompass(h => {
+    state.heading = h;
+    $('headingLine').textContent = '朝向：' + h.toFixed(1) + '°（对准目标时记录）';
+    // 接收端同步显示
+    $('headingLine2').textContent = '朝向：' + h.toFixed(1) + '°';
+  });
+  toast('指南针已启动，请保持手机水平');
+});
+
+$('btnStartCam').addEventListener('click', async () => {
+  const stream = await openCamera($('camPreview'), null);
+  if (stream) { $('snapBtn').disabled = false; toast('摄像头已打开，请对准目标后拍照'); }
+});
+
+$('snapBtn').addEventListener('click', () => {
+  const v = $('camPreview');
+  if (!v.srcObject) { toast('请先启动摄像头'); return; }
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth || 640; c.height = v.videoHeight || 480;
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  $('snapImg').src = c.toDataURL('image/jpeg', 0.8);
+  $('snapOverlay').style.display = 'flex';
+  setTimeout(() => { $('snapOverlay').style.display = 'none'; }, 1500);
+  toast('已拍照。若此时已对准目标，可点击“记录当前观测点”');
+});
+
+$('btnRecordObs').addEventListener('click', () => {
+  if (!state.obs.A) { recordObs('A'); toast('观测点 A 已记录，请移动 10~30 米后再次对准目标记录 B'); }
+  else if (!state.obs.B) { recordObs('B'); toast('观测点 B 已记录，可计算目标位置'); }
+  else { toast('观测点已满，请先清空'); }
+});
+$('btnResetObs').addEventListener('click', () => {
+  state.obs = { A: null, B: null };
+  $('slotA').classList.remove('filled'); $('slotA').innerHTML = '<b>观测点 A</b>待记录';
+  $('slotB').classList.remove('filled'); $('slotB').innerHTML = '<b>观测点 B</b>待记录';
+  checkTriReady();
+});
+
+$('btnModeDist').addEventListener('click', () => {
+  state.distMode = !state.distMode;
+  $('distMode').style.display = state.distMode ? 'block' : 'none';
+  $('btnModeDist').textContent = state.distMode ? '切换到“三角交汇”模式' : '切换到“单点+距离”模式';
+});
+
+$('btnCalcDist').addEventListener('click', calcByDistance);
+$('btnCalcTri').addEventListener('click', calcTriangulation);
+
+$('btnPush').addEventListener('click', () => {
+  if (!state.target) { toast('请先计算目标位置'); return; }
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) { toast('请先连接服务器'); return; }
+  state.ws.send(JSON.stringify({ type: 'target-update', target: state.target }));
+  $('pushLine').textContent = '已推送：' + state.target.lat.toFixed(6) + ', ' + state.target.lng.toFixed(6);
+  toast('目标位置已推送');
+});
+
+$('btnStartAr').addEventListener('click', startAR);
+$('arClose').addEventListener('click', stopAR);
+
+// 默认填充 ws 地址
+const defWs = 'ws://' + location.host;
+$('wsUrl').value = defWs;
+$('wsUrl2').value = defWs;
+
+// 心跳保活
+setInterval(() => { if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({type:'ping'})); }, 25000);
+
+})();
+</script>
+</body>
+</html>
